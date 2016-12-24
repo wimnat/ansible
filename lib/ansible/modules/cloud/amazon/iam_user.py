@@ -56,6 +56,12 @@ options:
     description:
       - The SSH public key. The public key must be encoded in ssh-rsa format or PEM format. It is used for authenticating a user to AWS CodeCommit.
     required: false
+  ssh_public_key_encoding:
+    description:
+      - The public key encoding format.
+    required: false
+    default: ssh-rsa
+    choices: [ 'ssh-rsa', 'pem' ]
   managed_policy:
     description:
       - A list of managed policy ARNs (can't use friendly names due to AWS API limitation) to attach to the user. To embed an inline policy, use M(iam_policy). To remove all existing policies, use an empty list item.
@@ -73,10 +79,19 @@ extends_documentation_fragment:
 EXAMPLES = '''
 # Note: These examples do not set authentication details, see the AWS Guide for details.
 
-# Create a user
+# Create a user and add to a pre-existing group "Devs"
 - iam_user:
     name: joe.blogs
     state: present
+    group:
+      - Devs
+
+# Create a user with a password and set the flag to ask the user to set a new password on first login
+- iam_user:
+    name: joe.bloggs
+    state: present
+    password: anotverysecretpassword
+    password_reset_required: yes
 
 # Create a user and attach a managed policy called "ReadOnlyAccess"
 - iam_user:
@@ -91,6 +106,13 @@ EXAMPLES = '''
     state: present
     managed_policy:
       -
+
+# Set the flag for a password change on next login for an existing user
+- iam_user:
+    name: some.existing.user
+    state: present
+    password_reset_required: yes
+    password_update_policy: always
 
 # Delete the user
 - iam_user:
@@ -128,8 +150,6 @@ status:
     returned: ACTIVE
     type: string
 '''
-
-import json
 
 try:
     import boto3
@@ -184,20 +204,69 @@ def compare_group_membership(current_group_membership, new_groups):
             return False
 
 
+def create_or_update_user_ssh_public_key(connection, module, changed):
+
+    ssh_public_key = module.params.get('ssh_public_key')
+    name = module.params.get('name')
+    changed = changed
+
+    get_ssh_public_key_list_of_dicts(connection, module, name)
+
+
+def create_or_update_user_password(connection, module, user_existed, changed):
+
+    name = module.params.get('name')
+    password = module.params.get('password')
+    password_reset_required = module.params.get('password_reset_required')
+    password_update_policy = module.params.get('password_update_policy')
+    changed = changed
+
+    if user_existed and password_update_policy != 'always':
+        pass
+    else:
+        if password == "":
+            try:
+                connection.delete_login_profile(UserName=name)
+                changed = True
+            except ClientError as e:
+                module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+        else:
+            try:
+                if password is not None and password_reset_required is not None:
+                    connection.update_login_profile(UserName=name, Password=password, PasswordResetRequired=password_reset_required)
+                    changed = True
+                elif password is not None and password_reset_required is None:
+                    connection.update_login_profile(UserName=name, Password=password)
+                    changed = True
+                elif password is None and password_reset_required is not None:
+                    connection.update_login_profile(UserName=name, PasswordResetRequired=password_reset_required)
+                    changed = True
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'NoSuchEntity':
+                    # If we don't have a password at this point we can not proceed to create a new profile
+                    if password is not None:
+                        try:
+                            connection.create_login_profile(UserName=name, Password=password, PasswordResetRequired=password_reset_required)
+                            changed = True
+                        except ClientError as e:
+                            module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+                else:
+                    module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+
+    return changed
+
+
 def create_or_update_user(connection, module):
 
     params = dict()
     params['Path'] = module.params.get('path')
     params['UserName'] = module.params.get('name')
-    password = module.params.get('password')
-    password_reset_required = module.params.get('password_reset_required')
-    password_update_policy = module.params.get('password_update_policy')
     managed_policies = module.params.get('managed_policy')
     groups = module.params.get('group')
     changed = False
     user_existed = False
 
-    # Get role
+    # Get user
     user = get_user(connection, params['UserName'], module)
 
     # If user is None, create it
@@ -266,42 +335,17 @@ def create_or_update_user(connection, module):
         user = get_user(connection, params['UserName'], module)
 
     # Set password
-    if password is not None or password_reset_required is not None:
-        if user_existed and password_update_policy != 'always':
-            pass
-        else:
-            if password == "":
-                try:
-                    connection.delete_login_profile(UserName=params['UserName'])
-                    changed = True
-                except ClientError as e:
-                    module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
-            else:
-                try:
-                    if password is not None and password_reset_required is not None:
-                        connection.update_login_profile(UserName=params['UserName'], Password=password, PasswordResetRequired=password_reset_required)
-                        changed = True
-                    elif password is not None and password_reset_required is None:
-                        connection.update_login_profile(UserName=params['UserName'], Password=password)
-                        changed = True
-                    elif password is None and password_reset_required is not None:
-                        connection.update_login_profile(UserName=params['UserName'], PasswordResetRequired=password_reset_required)
-                        changed = True
-                except ClientError as e:
-                    if e.response['Error']['Code'] == 'NoSuchEntity':
-                        # If we don't have a password at this point we can not proceed to create a new profile
-                        if password is not None:
-                            try:
-                                connection.create_login_profile(UserName=params['UserName'], Password=password, PasswordResetRequired=password_reset_required)
-                                changed = True
-                            except ClientError as e:
-                                module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
-                    else:
-                        module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+    if module.params.get('password') is not None or module.params.get('password_reset_required') is not None:
+        changed = create_or_update_user_password(connection, module, user_existed, changed)
+
+    # SSH key
+    if module.params.get('ssh_public_key') is not None:
+        changed = create_or_update_user_ssh_public_key(connection, module, changed)
 
     user['attached_policies'] = get_attached_policy_dict(connection, params['UserName'], module)
     user['groups'] = get_group_membership_dict(connection, params['UserName'], module)
     user['login_profile'] = get_login_profile(connection, params['UserName'], module)
+    user['ssh_public_keys'] = get_ssh_public_key_list_of_dicts(connection, module, params['UserName'])
     module.exit_json(changed=changed, iam_user=camel_dict_to_snake_dict(user))
 
 
@@ -348,6 +392,14 @@ def get_attached_policy_dict(connection, name, module):
 
 def get_group_membership_dict(connection, name, module):
 
+    """
+
+    :param connection:
+    :param name:
+    :param module:
+    :return:
+    """
+
     try:
         return connection.list_groups_for_user(UserName=name)['Groups']
     except ClientError as e:
@@ -355,6 +407,38 @@ def get_group_membership_dict(connection, name, module):
             return None
         else:
             module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+
+
+def get_ssh_public_key_list_of_dicts(connection, module, name):
+
+    """ Use boto3 to retrieve ssh public key detail for a particular user
+
+    Uses boto3 to first query for SSH public key list for a particular user and then uses this detail
+    to query for each individual SSH public key. This detail is then returned as a list of dicts
+
+    :param connection: AWS connection object
+    :param module: Ansible module object
+    :param name: IAM username
+    :return: list of dicts with each dict containing detail about the user's SSH public keys
+    """
+
+    # Set key encoding type to recognisable AWS format
+    if module.params.get('ssh_public_key_encoding') == 'ssh-rsa':
+        ssh_public_key_encoding = 'SSH'
+    elif module.params.get('ssh_public_key_encoding') == 'pem':
+        ssh_public_key_encoding = 'PEM'
+
+    try:
+        ssh_public_keys = connection.list_ssh_public_keys(UserName=name)['SSHPublicKeys']
+    except ClientError as e:
+        module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+
+    ssh_public_keys_detail = []
+    for key in ssh_public_keys:
+        ssh_public_keys_detail.append(connection.get_ssh_public_key(UserName=name,
+                                                                    SSHPublicKeyId=key['SSHPublicKeyId'],
+                                                                    Encoding=ssh_public_key_encoding)['SSHPublicKey'])
+    return ssh_public_keys_detail
 
 
 def get_login_profile(connection, name, module):
@@ -366,6 +450,7 @@ def get_login_profile(connection, name, module):
             return {}
         else:
             module.fail_json(msg=e.message, **camel_dict_to_snake_dict(e.response))
+
 
 def main():
 
@@ -379,6 +464,8 @@ def main():
             password_reset_required=dict(default=None, required=False, type='bool'),
             password_update_policy=dict(default='on_create', required=False, type='str', choices=['on_create', 'always']),
             managed_policy=dict(default=[], required=False, type='list'),
+            ssh_public_key=dict(default=None, required=False, type='str'),
+            ssh_public_key_encoding=dict(default='ssh-rsa', required=False, type='str', choices=['ssh-rsa', 'pem']),
             state=dict(default=None, choices=['present', 'absent'], required=True)
         )
     )
