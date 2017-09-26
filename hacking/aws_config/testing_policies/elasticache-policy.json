@@ -1,0 +1,26 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ElasticachePermissions",
+            "Effect": "Allow",
+            "Action": [
+                "elasticache:CreateCacheCluster",
+                "elasticache:CreateReplicationGroup",
+                "elasticache:CreateSnapshot",
+                "elasticache:CreateCacheSubnetGroup",
+                "elasticache:DeleteCacheCluster",
+                "elasticache:DeleteReplicationGroup",
+                "elasticache:DeleteSnapshot",
+                "elasticache:DeleteCacheSubnetGroup",
+                "elasticache:DescribeCacheClusters",
+                "elasticache:DescribeReplicationGroups",
+                "elasticache:DescribeCacheSubnetGroups",
+                "elasticache:ModifyCacheCluster",
+                "elasticache:ModifyCacheSubnetGroup",
+                "elasticache:ModifyReplicationGroup"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
