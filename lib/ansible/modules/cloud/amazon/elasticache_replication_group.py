@@ -383,7 +383,6 @@ def reboot_rep_group(module, connection, rep_group):
         try:
             connection.reboot_cache_cluster(CacheClusterId=node_group['CacheClusterId'],
                                             CacheNodeIdsToReboot=[node_group['CacheNodeId']])
-
             changed = True
             if module.params.get('wait'):
                 waiter = connection.get_waiter('cache_cluster_available')
@@ -458,7 +457,7 @@ def modify_rep_group(module, connection, rep_group):
             params['AutomaticFailoverEnabled'] = module.params['failover_enabled']
             changed = True
 
-    current_cache_cluster_count = len(rep_group['NodeGroups'][0]['NodeGroupMembers'])
+    current_cache_cluster_count = len(rep_group['MemberClusters'])
     while module.params['num_cache_clusters'] < current_cache_cluster_count:
         cluster_to_remove = [cc for cc in rep_group['NodeGroups'][0]['NodeGroupMembers']
                              if cc['CurrentRole'] != 'primary'][-1]
