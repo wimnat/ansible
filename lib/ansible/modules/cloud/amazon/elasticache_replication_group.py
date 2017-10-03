@@ -18,7 +18,7 @@ version_added: "2.5"
 author:
   - Rob White (@wimnat)
   - Will Thames (@willthames)
-options:
+options: 
   name:
     description:
       - The replication group identifier.
@@ -401,62 +401,88 @@ def modify_rep_group(module, connection, rep_group):
     params = dict()
     warnings = list()
 
-    # The output keys of describe_replication_groups are different
-    # to the input keys of modify_replication_group
-    rep_group['ReplicationGroupDescription'] = rep_group['Description']
+    # Get Primary cluster ID
+    primary_cluster_id = None
+    for node_group in rep_group['NodeGroups']:
+        for node_group_member in node_group['NodeGroupMembers']:
+            if node_group_member['CurrentRole'] == 'primary':
+                primary_cluster_id = node_group_member['CacheClusterId']
+                break
+        if primary_cluster_id is not None:
+            break
 
-    rep_group_params = {
-        'description': 'ReplicationGroupDescription',
-        'primary_cluster_id': 'PrimaryClusterId',
-        'node_type': 'CacheNodeType',
-    }
-    cache_cluster_params = {
-        'cache_engine_version': 'EngineVersion',
-        'cache_parameter_group': 'CacheParameterGroupName',
-        'cache_subnet_group_name': 'CacheSubnetGroupName',
-        'cache_security_groups': 'CacheSecurityGroupNames',
-        'preferred_maintenance_window': 'PreferredMaintenanceWindow',
-        'notification_topic_arn': 'NotificationTopicArn',
-        'auto_minor_version_upgrade': 'AutoMinorVersionUpgrade',
-        'snapshot_retention_limit': 'SnapshotRetentionLimit',
-        'snapshot_window': 'SnapshotWindow',
-    }
-
-    cache_cluster_id = rep_group['MemberClusters'][0]
+    # Use the primary cluster ID to get cluster detail. This will be used for comparison to user passed parameters.
     try:
-        cache_clusters = connection.describe_cache_clusters(CacheClusterId=cache_cluster_id)['CacheClusters']
-        cache_cluster = cache_clusters[0]
+        primary_cache_cluster = connection.describe_cache_clusters(CacheClusterId=primary_cluster_id)['CacheClusters'][0]
     except (botocore.exceptions.ClientError, botocore.exceptions.BotoCoreError) as e:
         if e.response['Error']['Code'] == 'CacheClusterNotFound':
-            cache_cluster = dict()
+            primary_cache_cluster = dict()
         else:
-            module.fail_json_aws(e, msg="Couldn't describe cache cluster")
+            module.fail_json_aws(e, msg=e.message)
 
-    for k, v in rep_group_params.items():
-        if module.params.get(k) is not None and rep_group[v] != module.params.get(k):
-            params[v] = module.params.get[k]
+    # Description
+    if module.params.get('description') is not None and rep_group['Description'] != module.params.get('description'):
+        params['ReplicationGroupDescription'] = module.params.get('description')
 
-    for k, v in cache_cluster_params.items():
-        if module.params.get(k) is not None:
-            if v in cache_cluster:
-                if cache_cluster.get(v) != module.params.get(k):
-                    params[v] = module.params.get(k)
-            else:
-                warnings.append("Cannot determine current cluster value for parameter "
-                                "%s. Blindly setting it" % k)
-                params[v] = module.params.get(k)
+    # Primary cluster (used to change to the primary cluster ID)
+    if module.params.get('primary_cluster_id') is not None and primary_cluster_id != module.params.get('primary_cluster_id'):
+        params['PrimaryClusterId'] = module.params.get('primary_cluster_id')
 
-    # data structure of returned security groups from describe_cache_clusters is
-    # different to that expected by modify_replication_group
-    if set(module.params['security_group_ids']) != set([sg['SecurityGroupId'] for sg in cache_cluster['SecurityGroups']]):
-        params['SecurityGroupIds'] = module.params['security_group_ids']
-
+    # Automatic failover
     if module.params['failover_enabled'] is not None:
         if (module.params['failover_enabled'] and rep_group['AutomaticFailover'] in ['disabled', 'disabling'] or
-                not module.params['failover_enabled'] and rep_group['AutomaticFailover'] in ['enabled', 'enabling']):
+                    not module.params['failover_enabled'] and rep_group['AutomaticFailover'] in ['enabled', 'enabling']):
             params['AutomaticFailoverEnabled'] = module.params['failover_enabled']
-            changed = True
 
+    # Cache security groups (compared using primary cluster)
+    #   Create a list of sec group names
+    cluster_sec_group_name_list = []
+    for sec_group in primary_cache_cluster['CacheSecurityGroups']:
+        cluster_sec_group_name_list.append(sec_group['CacheSecurityGroupName'])
+
+    if module.params.get('cache_security_groups') is not None and set(cluster_sec_group_name_list) != set(module.params.get('cache_security_groups')):
+        params['CacheSecurityGroupNames'] = module.params.get('cache_security_groups')
+
+    # Security groups (compared using primary cluster)
+    #   Create a list of sec group IDs
+    # FIXME: Handle both security group Ids and Names for SGs
+    cluster_sec_group_id_list = []
+    for sec_group in primary_cache_cluster['SecurityGroups']:
+        cluster_sec_group_id_list.append(sec_group['SecurityGroupId'])
+
+    if module.params.get('security_group_ids') is not None and set(cluster_sec_group_id_list) != set(module.params.get('security_group_ids')):
+        params['SecurityGroupIds'] = module.params.get('security_group_ids')
+
+    # Preferred maintenance window (compared using primary cluster)
+    if module.params.get('preferred_maintenance_window') is not None and primary_cache_cluster['PreferredMaintenanceWindow'] != module.params.get('preferred_maintenance_window'):
+        params['PreferredMaintenanceWindow'] = module.params.get('preferred_maintenance_window')
+
+    # Notification topic (compared using primary cluster)
+    if module.params.get('notification_topic_arn') is not None and 'NotificationConfiguration' in primary_cache_cluster and primary_cache_cluster['NotificationConfiguration']['TopicArn'] != module.params.get('notification_topic_arn'):
+        params['NotificationTopicArn'] = module.params.get('notification_topic_arn')
+
+    # Cache parameter group (compared using primary cluster)
+    if module.params.get('cache_parameter_group') is not None and primary_cache_cluster['CacheParameterGroup']['CacheParameterGroupName'] != module.params.get('cache_parameter_group'):
+        params['CacheParameterGroupName'] = module.params.get('cache_parameter_group')
+
+    # Engine version (compared using primary cluster)
+    if module.params.get('cache_engine_version') is not None and primary_cache_cluster['EngineVersion'] != module.params.get('cache_engine_version'):
+        params['EngineVersion'] = module.params.get('cache_engine_version')
+
+    # Snapshot retention limit
+    if module.params.get('snapshot_retention_limit') is not None and rep_group['SnapshotRetentionLimit'] != module.params.get('snapshot_retention_limit'):
+        params['SnapshotRetentionLimit'] = module.params.get('snapshot_retention_limit')
+
+    # Snapshot window
+    if module.params.get('snapshot_window') is not None and rep_group['SnapshotWindow'] != module.params.get('snapshot_window'):
+        params['SnapshotWindow'] = module.params.get('snapshot_window')
+
+    # Cache node type
+    #   Boto3 docs state CacheNodeType is returned as part of replication_group describe but this is inaccurate.  Use cluster describe instead.
+    if module.params.get('node_type') is not None and primary_cache_cluster['CacheNodeType'] != module.params.get('node_type'):
+        params['CacheNodeType'] = module.params.get('node_type')
+
+    # Cache size
     current_cache_cluster_count = len(rep_group['MemberClusters'])
     while module.params['num_cache_clusters'] < current_cache_cluster_count:
         cluster_to_remove = [cc for cc in rep_group['NodeGroups'][0]['NodeGroupMembers']
@@ -468,7 +494,8 @@ def modify_rep_group(module, connection, rep_group):
         except (botocore.exceptions.ClientError, botocore.exceptions.BotoCoreError) as e:
             module.fail_json_aws(e, "Couldn't remove cache cluster %s" % cluster_to_remove['CacheClusterId'])
 
-    new_node_id = max([int(cc['CacheNodeId']) for cc in rep_group['NodeGroups'][0]['NodeGroupMembers']]) + 1
+    # TODO: Check this line below. I changed to add 2 because otherwise it would create an ID already in use
+    new_node_id = max([int(cc['CacheNodeId']) for cc in rep_group['NodeGroups'][0]['NodeGroupMembers']]) + 2
     while module.params['num_cache_clusters'] > current_cache_cluster_count:
         try:
             # Cache Cluster Ids must be less than 20 letters and not contain two consecutive hyphens
@@ -484,8 +511,6 @@ def modify_rep_group(module, connection, rep_group):
         if module.params.get('wait'):
             waiter = connection.get_waiter('cache_cluster_available')
             waiter.wait(CacheClusterId=new_cache_cluster_id)
-
-    # FIXME: Handle both security group Ids and Names for SGs
 
     if params:
         params['ReplicationGroupId'] = module.params.get('name')
@@ -531,7 +556,7 @@ def main():
             cache_port=dict(type='int'),
             notification_topic_arn=dict(),
             state=dict(required=True, choices=['present', 'absent', 'rebooted']),
-            snapshot_retention_limit=dict(),
+            snapshot_retention_limit=dict(type='int'),
             snapshot_window=dict(),
             retain_primary_cluster=dict(default=False, type='bool'),
             final_snapshot_id=dict(),
