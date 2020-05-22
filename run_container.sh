@@ -1,1 +1,1 @@
-docker run -it -v /opt/codebase/ansible:/opt centos /bin/bash
+docker run -it -v ~/.aws:/root/.aws -v /opt/codebase/ansible:/opt centos:7 /bin/bash
