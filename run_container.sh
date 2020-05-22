@@ -1,1 +1,1 @@
-docker run -v .:/opt -i -t centos /bin/bash
+docker run -it -v /opt/codebase/ansible:/opt centos /bin/bash
